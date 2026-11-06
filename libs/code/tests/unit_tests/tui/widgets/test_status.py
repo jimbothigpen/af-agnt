@@ -725,6 +725,50 @@ class TestBusyIndicator:
             assert "Switching" in str(msg.render())
 
 
+class TestSubagentIndicator:
+    """Tests for the background subagent count in the status bar."""
+
+    async def test_empty_by_default(self) -> None:
+        """The indicator is hidden when there are no subagents."""
+        async with StatusBarApp().run_test() as pilot:
+            indicator = pilot.app.query_one("#subagent-indicator", Static)
+            assert indicator.display is False
+
+    async def test_showing_running_and_waiting(self) -> None:
+        """Counts are pluralized and combined with a bullet separator."""
+        async with StatusBarApp().run_test() as pilot:
+            bar = pilot.app.query_one("#status-bar", StatusBar)
+            bar.set_subagents(3, 1)
+            await pilot.pause()
+            indicator = pilot.app.query_one("#subagent-indicator", Static)
+            assert indicator.display is True
+            text = str(indicator.render())
+            assert "3 subagents running" in text
+            assert "1 waiting" in text
+            # attention class set when waiting > 0
+            assert indicator.has_class("-attention")
+
+    async def test_singular_running_only(self) -> None:
+        async with StatusBarApp().run_test() as pilot:
+            bar = pilot.app.query_one("#status-bar", StatusBar)
+            bar.set_subagents(1, 0)
+            await pilot.pause()
+            indicator = pilot.app.query_one("#subagent-indicator", Static)
+            text = str(indicator.render())
+            assert "1 subagent running" in text
+            assert "waiting" not in text
+
+    async def test_clearing_returns_to_hidden(self) -> None:
+        async with StatusBarApp().run_test() as pilot:
+            bar = pilot.app.query_one("#status-bar", StatusBar)
+            bar.set_subagents(2, 1)
+            await pilot.pause()
+            bar.set_subagents(0, 0)
+            await pilot.pause()
+            indicator = pilot.app.query_one("#subagent-indicator", Static)
+            assert indicator.display is False
+
+
 class TestQueuedCount:
     """Tests for the queued-message count in the connection indicator."""
 

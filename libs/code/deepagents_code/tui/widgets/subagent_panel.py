@@ -54,6 +54,8 @@ _MAX_BODY_HEIGHT = 12
 _AGENTS_CHROME_LINES = 1
 _TICK_INTERVAL = 0.1
 _LABEL_FALLBACK_MAX_CHARS = 60
+_ASYNC_EVAL_ID = "__async__"
+"""Phase key for background async tasks; matches `ASYNC_PANEL_EVAL_ID`."""
 
 
 def _right_block_width() -> int:
@@ -571,11 +573,14 @@ class SubagentPanel(Vertical):
         self._refresh()
 
     def prepare_turn(self, *, model_label: str | None = None) -> None:
-        """Clear the previous workflow's fan-out for a new turn."""
+        """Clear the previous workflow's fan-out for a new turn.
+
+        The background async-subagent phase survives, since those tasks outlive turns.
+        """
         self._model_label = (
             _sanitize(model_label, max_chars=_MODEL_COL) if model_label else None
         )
-        self._clear()
+        self._clear(keep_async=True)
 
     def reset(self, *, model_label: str | None = None, **_kwargs: Any) -> None:
         """Clear all phases and hide the panel immediately (e.g. on `/clear`)."""
@@ -584,12 +589,19 @@ class SubagentPanel(Vertical):
             _sanitize(model_label, max_chars=_MODEL_COL) if model_label else None
         )
 
-    def _clear(self) -> None:
+    def _clear(self, *, keep_async: bool = False) -> None:
         """Drop all phase state, stop the timer, and hide the panel.
 
         Leaves `expanded` and `_model_label` untouched so the user's open/closed
         choice and the session model survive a clear.
+
+        Args:
+            keep_async: Retain the background async-subagent phase when it
+                still has running tasks.
         """
+        kept = self._phases.get(_ASYNC_EVAL_ID) if keep_async else None
+        if kept is not None and not kept.any_running():
+            kept = None
         self._phases.clear()
         self._phase_order.clear()
         self._active_eval_id = None
@@ -598,6 +610,14 @@ class SubagentPanel(Vertical):
         self._last_render.clear()
         self._stop_timer()
         self.remove_class("-visible")
+        if kept is not None:
+            kept.index = 1
+            self._phases[_ASYNC_EVAL_ID] = kept
+            self._phase_order.append(_ASYNC_EVAL_ID)
+            self._active_eval_id = _ASYNC_EVAL_ID
+            self._show()
+            self._ensure_timer()
+            self._refresh()
 
     def finalize_running(self) -> None:
         """Mark any still-running subagents as cancelled and stop ticking.
@@ -688,6 +708,24 @@ class SubagentPanel(Vertical):
                 elif record.status == "cancelled":
                     cancelled += 1
         return done, total, failed, cancelled
+
+    def _status_bar_counts(self) -> tuple[int, int]:
+        """Return `(running, waiting_input)` counts for the status bar.
+
+        `waiting_input` is 0 for now — there is no distinct "awaiting user input"
+        subagent state yet.  The status bar always overwrites both values, so a
+        stale count cannot survive a thread switch.
+
+        Returns:
+            A `(running, waiting_input)` tuple.
+        """
+        running = sum(
+            1
+            for phase in self._phases.values()
+            for record in phase.records.values()
+            if record.status == "running"
+        )
+        return running, 0
 
     def _body_height(self) -> int:
         """Constant body height for the turn — sized to the largest phase.

@@ -192,6 +192,31 @@ is `waiting`, which isn't terminal.
 """
 
 
+ASYNC_PANEL_EVAL_ID = "__async__"
+"""`eval_id` that groups background async-subagent events into one persistent panel phase."""
+
+
+def _emit_panel_event(runtime: ToolRuntime, phase: str, task_id: str, **fields: Any) -> None:
+    """Emit a `subagent` lifecycle event on the custom stream; never raises."""
+    writer = getattr(runtime, "stream_writer", None)
+    if writer is None:
+        return
+    try:
+        writer({"type": "subagent", "phase": phase, "id": task_id, "eval_id": ASYNC_PANEL_EVAL_ID, **fields})
+    except Exception:  # observability must not break tools
+        logger.debug("Failed to emit subagent panel event for task %s", task_id, exc_info=True)
+
+
+def _emit_terminal_event(runtime: ToolRuntime, task_id: str, previous: str, status: str) -> None:
+    """Emit a panel `complete`/`error` event when a task first reaches a terminal status."""
+    if status not in _TERMINAL_STATUSES or previous in _TERMINAL_STATUSES:
+        return
+    if status in {"success", "cancelled"}:
+        _emit_panel_event(runtime, "complete", task_id)
+    else:
+        _emit_panel_event(runtime, "error", task_id, error=status)
+
+
 class AsyncTask(TypedDict):
     """A tracked async subagent task persisted in agent state."""
 
@@ -856,6 +881,7 @@ def _build_start_tool(
             "last_updated_at": now,
         }
         msg = f"Launched async subagent. task_id: {task_id}"
+        _emit_panel_event(runtime, "start", task_id, subagent_type=subagent_type, label=" ".join(description.split())[:60])
         return Command(
             update={
                 "messages": [ToolMessage(msg, tool_call_id=runtime.tool_call_id)],
@@ -899,6 +925,7 @@ def _build_start_tool(
             "last_updated_at": now,
         }
         msg = f"Launched async subagent. task_id: {task_id}"
+        _emit_panel_event(runtime, "start", task_id, subagent_type=subagent_type, label=" ".join(description.split())[:60])
         return Command(
             update={
                 "messages": [ToolMessage(msg, tool_call_id=runtime.tool_call_id)],
@@ -1086,6 +1113,7 @@ def _build_check_tool(
         except Exception as e:  # noqa: BLE001  # get_sync() may raise ValueError; SDK raises untyped errors
             return f"Failed to get run status: {e}"
         result = _keep_cancelled(task, _build_check_result(run, task["thread_id"], thread))
+        _emit_terminal_event(runtime, task["task_id"], task["status"], result["status"])
         return _build_check_command(result, task, run["run_id"], runtime.tool_call_id)
 
     async def acheck_async_task(
@@ -1100,6 +1128,7 @@ def _build_check_tool(
         except Exception as e:  # noqa: BLE001  # LangGraph SDK raises untyped errors
             return f"Failed to get run status: {e}"
         result = _keep_cancelled(task, _build_check_result(run, task["thread_id"], thread))
+        _emit_terminal_event(runtime, task["task_id"], task["status"], result["status"])
         return _build_check_command(result, task, run["run_id"], runtime.tool_call_id)
 
     return StructuredTool.from_function(
@@ -1279,7 +1308,7 @@ def _cancel_earlier_runs(client: SyncLangGraphClient, task: AsyncTask) -> None:
             run = client.runs.get(thread_id=task["thread_id"], run_id=run_id)
             if run["status"] in {"running", "pending"}:
                 client.runs.cancel(thread_id=task["thread_id"], run_id=run_id)
-        except Exception:  # noqa: BLE001  # LangGraph SDK raises untyped errors
+        except Exception:  # LangGraph SDK raises untyped errors
             logger.warning("Failed to cancel earlier run %s of task %s", run_id, task["task_id"], exc_info=True)
 
 
@@ -1290,7 +1319,7 @@ async def _acancel_earlier_runs(client: LangGraphClient, task: AsyncTask) -> Non
             run = await client.runs.get(thread_id=task["thread_id"], run_id=run_id)
             if run["status"] in {"running", "pending"}:
                 await client.runs.cancel(thread_id=task["thread_id"], run_id=run_id)
-        except Exception:  # noqa: BLE001  # LangGraph SDK raises untyped errors
+        except Exception:  # LangGraph SDK raises untyped errors
             logger.warning("Failed to cancel earlier run %s of task %s", run_id, task["task_id"], exc_info=True)
 
 
@@ -1323,6 +1352,7 @@ def _build_cancel_tool(
             "last_updated_at": now,
         }
         msg = f"Cancelled async subagent task: {tracked['task_id']}"
+        _emit_terminal_event(runtime, tracked["task_id"], tracked["status"], "cancelled")
         return Command(
             update={
                 "messages": [ToolMessage(msg, tool_call_id=runtime.tool_call_id)],
@@ -1354,6 +1384,7 @@ def _build_cancel_tool(
             "last_updated_at": now,
         }
         msg = f"Cancelled async subagent task: {tracked['task_id']}"
+        _emit_terminal_event(runtime, tracked["task_id"], tracked["status"], "cancelled")
         return Command(
             update={
                 "messages": [ToolMessage(msg, tool_call_id=runtime.tool_call_id)],
@@ -1730,7 +1761,7 @@ class AsyncSubAgentMiddleware(AgentMiddleware[Any, ContextT, ResponseT]):
     async def _aobserve_task(self, task: AsyncTask) -> tuple[Run, Thread | None] | None:
         try:
             return await asyncio.wait_for(_aobserve(self._clients.get_async(task["agent_name"]), task), _PULL_TIMEOUT_SECONDS)
-        except Exception:  # noqa: BLE001  # LangGraph SDK raises untyped errors, or it timed out; checked again next time
+        except Exception:  # LangGraph SDK raises untyped errors, or it timed out; checked again next time
             logger.warning("Failed to check task %s", task["task_id"], exc_info=True)
             return None
 

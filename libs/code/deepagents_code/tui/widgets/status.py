@@ -627,6 +627,17 @@ class StatusBar(Vertical):
         text-style: bold;
     }
 
+    StatusBar .status-subagents {
+        width: auto;
+        padding: 0 1 0 0;
+        color: $text-muted;
+        text-style: bold;
+    }
+
+    StatusBar .status-subagents.-attention {
+        color: $warning;
+    }
+
     StatusBar .status-message {
         width: auto;
         padding: 0 1 0 0;
@@ -696,6 +707,8 @@ class StatusBar(Vertical):
     status_message: reactive[str] = reactive("", init=False)
     connection_state: reactive[ConnectionState] = reactive("", init=False)
     queued_count: reactive[int] = reactive(0, init=False)
+    subagents_running: reactive[int] = reactive(0, init=False)
+    subagents_waiting: reactive[int] = reactive(0, init=False)
     approval_mode: reactive[str] = reactive(default="manual", init=False)
     cwd: reactive[str] = reactive("", init=False)
     branch: reactive[str] = reactive("", init=False)
@@ -751,6 +764,7 @@ class StatusBar(Vertical):
             yield ModelLabel(id="model-display")
         with Horizontal(classes="status-metrics"):
             yield Static("", classes="status-connection", id="connection-indicator")
+            yield Static("", classes="status-subagents", id="subagent-indicator")
             yield Static("", classes="status-message", id="status-message")
             yield MetricsLine(classes="status-cache-line", id="cache-display")
             yield MetricsLine(classes="status-context-line", id="tokens-display")
@@ -798,6 +812,7 @@ class StatusBar(Vertical):
         # Reactives are `init=False`, so the connection watcher never fires on
         # mount; render once to hide the empty indicator (and its padding).
         self._render_connection()
+        self._render_subagents()
         self.watch_status_message(self.status_message)
         self._refresh_metrics()
 
@@ -881,6 +896,14 @@ class StatusBar(Vertical):
         """Re-render the connection indicator when the queued count changes."""
         self._render_connection()
 
+    def watch_subagents_running(self, _new_value: int) -> None:
+        """Re-render the subagent indicator when the running count changes."""
+        self._render_subagents()
+
+    def watch_subagents_waiting(self, _new_value: int) -> None:
+        """Re-render the subagent indicator when the waiting count changes."""
+        self._render_subagents()
+
     def _spinner_active(self) -> bool:
         """Whether any indicator (connection or busy) needs the shared spinner.
 
@@ -942,6 +965,43 @@ class StatusBar(Vertical):
         text = separator.join(parts)
         widget.display = bool(text)
         widget.update(text)
+
+    def _render_subagents(self) -> None:
+        """Render the background-subagent count indicator text."""
+        try:
+            widget = self.query_one("#subagent-indicator", Static)
+        except NoMatches:
+            return
+
+        parts: list[str] = []
+        if self.subagents_running > 0:
+            label = "subagent" if self.subagents_running == 1 else "subagents"
+            parts.append(f"{self.subagents_running} {label} running")
+        if self.subagents_waiting > 0:
+            parts.append(f"{self.subagents_waiting} waiting input")
+        text = ", ".join(parts)
+        if text:
+            widget.add_class("-attention")
+        else:
+            widget.remove_class("-attention")
+        widget.display = bool(text)
+        widget.update(text)
+
+    def set_subagents(
+        self, running: int = 0, waiting_input: int = 0
+    ) -> None:
+        """Update the running and waiting-input subagent counts.
+
+        Both arguments default to 0 so callers can pass only the
+        values that changed; the full pair is always written so a
+        stale count cannot survive.
+
+        Args:
+            running: Number of background subagents currently in progress.
+            waiting_input: Number of background subagents blocked on user input.
+        """
+        self.subagents_running = running
+        self.subagents_waiting = waiting_input
 
     def _render_busy(self) -> None:
         """Render the animated busy indicator into the status-message slot."""

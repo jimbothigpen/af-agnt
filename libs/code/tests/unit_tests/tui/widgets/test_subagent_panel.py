@@ -350,3 +350,33 @@ class TestPhaseTiming:
             )
         )
         assert phase.elapsed_seconds() == pytest.approx(5.0)
+
+class TestAsyncPhase:
+    async def test_async_phase_survives_prepare_turn_while_running(self) -> None:
+        async with PanelApp().run_test(size=(160, 24)) as pilot:
+            panel = pilot.app.query_one("#panel", SubagentPanel)
+            panel.on_subagent_event(_start("bg", "__async__"))
+            panel.on_subagent_event(_start("js", "E1"))
+            panel.prepare_turn()
+            await pilot.pause()
+            assert panel.has_class("-visible")
+            assert panel._status_bar_counts() == (1, 0)
+            assert list(panel._phases) == ["__async__"]
+
+    async def test_finished_async_phase_cleared_on_prepare_turn(self) -> None:
+        async with PanelApp().run_test(size=(160, 24)) as pilot:
+            panel = pilot.app.query_one("#panel", SubagentPanel)
+            panel.on_subagent_event(_start("bg", "__async__"))
+            panel.on_subagent_event(_complete("bg", "__async__"))
+            panel.prepare_turn()
+            await pilot.pause()
+            assert not panel.has_class("-visible")
+            assert panel._status_bar_counts() == (0, 0)
+
+    async def test_reset_clears_running_async_phase(self) -> None:
+        async with PanelApp().run_test(size=(160, 24)) as pilot:
+            panel = pilot.app.query_one("#panel", SubagentPanel)
+            panel.on_subagent_event(_start("bg", "__async__"))
+            panel.reset()
+            await pilot.pause()
+            assert panel._status_bar_counts() == (0, 0)

@@ -18046,6 +18046,7 @@ class DeepAgentsApp(App):
             subagent_panel = self._get_subagent_panel()
             if subagent_panel is not None:
                 subagent_panel.reset()
+                self._status_bar.set_subagents(0, 0)
             self._context_tokens = 0
             self._tokens_approximate = False
             self._update_tokens(0)
@@ -24204,6 +24205,9 @@ class DeepAgentsApp(App):
         panel = self._get_subagent_panel()
         if panel is not None:
             panel.on_subagent_event(event)
+            running, waiting = panel._status_bar_counts()
+            if self._status_bar is not None:
+                self._status_bar.set_subagents(running, waiting)
 
     async def _on_auto_mode_event(self, event: dict[str, Any]) -> None:
         """Render one compact sanitized Auto control-state notice.
