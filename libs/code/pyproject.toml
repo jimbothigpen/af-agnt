@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "deepagents-code"
-version = "0.2.4"
+version = "0.2.5"
 description = "Terminal coding agent built on the Deep Agents SDK - works with any model, with persistent memory, customizable skills, subagents, and approval controls."
 readme = "README.md"
 license = { text = "MIT" }
@@ -25,7 +25,7 @@ classifiers = [
 ]
 dependencies = [
     # Framework
-    "deepagents==0.7.32",
+    "deepagents==0.7.34",
     "langchain>=1.4.9,<2.0.0",
     # TODO: Remove this temporary floor once the pinned deepagents release
     # requires langchain-core>=1.7.2 for add_notification_metadata.

@@ -660,7 +660,7 @@ wheels = [
 
 [[package]]
 name = "deepagents"
-version = "0.7.32"
+version = "0.7.34"
 source = { editable = "../deepagents" }
 dependencies = [
     { name = "langchain" },
@@ -746,7 +746,7 @@ test = [
 
 [[package]]
 name = "deepagents-code"
-version = "0.2.4"
+version = "0.2.5"
 source = { editable = "../code" }
 dependencies = [
     { name = "aiosqlite" },
