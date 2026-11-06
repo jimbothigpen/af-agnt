@@ -674,6 +674,7 @@ async def server_session(
         Tuple of `(remote_agent, server_process)`.
     """
     server_proc: ServerProcess | None = None
+    agent: RemoteAgent | None = None
     mcp_session_manager: MCPSessionManager | None = None
     try:
         agent, server_proc, mcp_session_manager = await start_server_and_get_agent(
@@ -717,6 +718,11 @@ async def server_session(
                 await mcp_session_manager.cleanup()
             except Exception:
                 logger.warning("MCP session cleanup failed", exc_info=True)
+        if agent is not None:
+            try:
+                await agent.aclose()
+            except Exception:
+                logger.warning("Agent client cleanup failed", exc_info=True)
         if server_proc is not None:
             server_proc.stop()
         # Drain unconditionally: when startup fails inside

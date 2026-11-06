@@ -401,6 +401,16 @@ class RemoteAgent:
             )
         return self._graph
 
+    async def aclose(self) -> None:
+        """Close the HTTP clients owned by this agent."""
+        if self._graph is None:
+            return
+        graph = self._graph
+        try:
+            await graph.client.http.client.aclose()
+        finally:
+            graph.sync_client.http.client.close()
+
     async def aget_model_metadata(self) -> ModelMetadata:
         """Read the launch model's metadata without binding a conversation thread.
 

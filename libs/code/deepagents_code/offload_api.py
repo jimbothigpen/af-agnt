@@ -237,8 +237,12 @@ async def _lifespan(_app: Starlette) -> AsyncIterator[None]:
             prebuild.cancel()
             await asyncio.wait((prebuild,))
             from deepagents_code.extensions.runtime import shutdown_server_extensions
+            from deepagents_code.server_graph import shutdown_local_workers
 
-            await shutdown_server_extensions()
+            try:
+                await shutdown_local_workers()
+            finally:
+                await shutdown_server_extensions()
         finally:
             await _flush_traces()
 

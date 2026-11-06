@@ -249,6 +249,9 @@ def generate_langgraph_json(
         "graphs": {"agent": graph_ref},
     }
     if graph_ref == _DCODE_GRAPH_REF:
+        config["graphs"]["local_worker"] = (
+            "deepagents_code.server_graph:make_worker_graph"
+        )
         config["http"] = {
             "app": "deepagents_code.offload_api:app",
             "enable_custom_route_auth": True,

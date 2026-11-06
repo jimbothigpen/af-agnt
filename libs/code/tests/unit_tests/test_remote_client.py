@@ -43,6 +43,30 @@ _COMPACTED_RESULT = {
 # ---------------------------------------------------------------------------
 
 
+class TestRemoteAgentCleanup:
+    async def test_close_without_graph_does_not_create_clients(self) -> None:
+        agent = RemoteAgent("http://localhost:8123")
+        await agent.aclose()
+        assert agent._graph is None
+
+    async def test_close_owned_clients(self) -> None:
+        agent = RemoteAgent("http://localhost:8123")
+        graph = agent._get_graph()
+        await agent.aclose()
+        await agent.aclose()
+        assert graph.client.http.client.is_closed
+        assert graph.sync_client.http.client.is_closed
+
+    async def test_sync_client_closes_when_async_close_fails(self) -> None:
+        agent = RemoteAgent("http://localhost:8123")
+        graph = MagicMock()
+        graph.client.http.client.aclose = AsyncMock(side_effect=RuntimeError("close"))
+        agent._graph = graph
+        with pytest.raises(RuntimeError, match="close"):
+            await agent.aclose()
+        graph.sync_client.http.client.close.assert_called_once()
+
+
 class TestPrepareConfig:
     def test_preserves_top_level_tags(self) -> None:
         """Every dcode config crosses this seam before reaching the server.

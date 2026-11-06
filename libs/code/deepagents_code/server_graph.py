@@ -13,9 +13,12 @@ from __future__ import annotations
 
 import asyncio
 import atexit
+import functools
 import logging
+import os
 import sys
 from collections import OrderedDict
+from contextlib import asynccontextmanager
 from pathlib import Path
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, NamedTuple
@@ -25,6 +28,11 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 # `typing.get_type_hints` at graph-load time. A name that only type checkers
 # can see fails to resolve, and the server then refuses to load the graph.
 from langgraph_sdk.runtime import ServerRuntime as LangGraphServerRuntime  # noqa: TC002
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
+    from langchain.tools import ToolRuntime
 
 from deepagents_code._cli_context import CLIContextSchema
 from deepagents_code._server_config import ServerConfig
@@ -338,6 +346,9 @@ class ServerRuntime(NamedTuple):
     model_environment: Mapping[str, str] | None = None
     """Immutable workspace environment shared by metadata resolution and inference."""
 
+    worker: Any = None
+    """Compiled agent served as `local_worker`; has no async subagents."""
+
 
 async def _make_graphs(
     *,
@@ -544,7 +555,19 @@ async def _make_graphs_in_environment(
     extension_registry: ExtensionRegistry | None = None
 
     def _create_cli_graphs_sync() -> ServerRuntime:
-        async_subagents = load_async_subagents() or None
+        async_subagents = [
+            *(load_async_subagents() or []),
+            {
+                "name": "local_worker",
+                "description": (
+                    "Background coding worker with the current workspace, model, "
+                    "tools, and approval policy."
+                ),
+                "graph_id": "local_worker",
+                "notify_parent": False,
+                "prepare_run": prepare_local_worker_run,
+            },
+        ]
         auto_mode_enabled = config.interactive and sandbox_backend is None
 
         interpreter_config = (
@@ -557,7 +580,8 @@ async def _make_graphs_in_environment(
             else None
         )
 
-        agent, composite_backend = create_cli_agent(
+        build_agent = functools.partial(
+            create_cli_agent,
             model=result.model,
             assistant_id=config.assistant_id,
             tools=tools,
@@ -600,6 +624,8 @@ async def _make_graphs_in_environment(
             model_result=result,
             profile_overrides=config.profile_overrides,
         )
+        agent, composite_backend = build_agent()
+        worker, _ = build_agent(async_subagents=None)
         from deepagents_code.offload_middleware import offload_operation_from
 
         offload = offload_operation_from(composite_backend)
@@ -621,6 +647,7 @@ async def _make_graphs_in_environment(
                 result.unsupported_modalities,
             ),
             model_environment=workspace_env,
+            worker=worker,
         )
 
     from deepagents_code._env_vars import EXPERIMENTAL, is_env_truthy
@@ -1124,3 +1151,144 @@ async def make_graph(
         binding = await require_thread_workspace(thread_id, context.workspace)
         return (await _workspace_runtime(binding)).agent
     return (await get_server_runtime()).agent
+
+
+_worker_threads: dict[str, tuple[str, Any]] = {}
+_worker_lock = asyncio.Lock()
+_workers_stopping = False
+
+
+@asynccontextmanager
+async def prepare_local_worker_run(
+    thread_id: str, runtime: ToolRuntime
+) -> AsyncIterator[dict[str, Any]]:
+    """Validate parent ownership and reserve the child for a worker run.
+
+    Yields:
+        Child ownership headers for the run request.
+
+    Raises:
+        ValueError: Missing parent context or a conflicting child owner.
+        RuntimeError: The server is shutting down.
+    """
+    from deepagents_code._env_vars import SERVER_ENV_PREFIX
+    from deepagents_code.sessions import get_db_path
+    from deepagents_code.thread_ownership import (
+        OWNER_KEY,
+        _finish_mutation,
+        ensure_owned,
+        writer_guard,
+    )
+    from deepagents_code.workspace import require_thread_workspace
+
+    configurable = runtime.config.get("configurable", {})
+    parent_id = configurable.get("thread_id")
+    context = CLIContextSchema.from_payload(runtime.context)
+    if (
+        context is None
+        or not isinstance(parent_id, str)
+        or not parent_id
+        or parent_id == thread_id
+    ):
+        msg = "A distinct parent thread and workspace context are required."
+        raise ValueError(msg)
+    await require_thread_workspace(parent_id, context.workspace)
+    raw_db_path = os.environ.get(f"{SERVER_ENV_PREFIX}DB_PATH")
+    db_path = Path(raw_db_path) if raw_db_path else await asyncio.to_thread(get_db_path)
+    async with _worker_lock:
+        if _workers_stopping:
+            msg = "Local workers are shutting down."
+            raise RuntimeError(msg)
+        previous = _worker_threads.get(thread_id)
+        if previous is not None and previous[0] != parent_id:
+            msg = "The local worker belongs to another parent."
+            raise ValueError(msg)
+        lease = None
+
+        def reserve() -> None:
+            nonlocal lease
+            lease = ensure_owned(thread_id, db_path=db_path)
+            _worker_threads[thread_id] = (parent_id, lease)
+
+        try:
+            async with writer_guard(
+                parent_id, db_path=db_path, token=str(configurable.get(OWNER_KEY, ""))
+            ):
+                await _finish_mutation(asyncio.to_thread(reserve))
+            yield {"headers": {OWNER_KEY: lease.token}}
+        except BaseException:
+            if previous is None and lease is not None:
+                await _finish_mutation(asyncio.to_thread(lease.release))
+                _worker_threads.pop(thread_id, None)
+            raise
+
+
+async def shutdown_local_workers() -> None:
+    """Cancel active child runs before releasing their ownership leases."""
+    from langgraph_sdk import get_client
+
+    from deepagents_code.thread_ownership import _finish_mutation
+
+    global _workers_stopping  # noqa: PLW0603
+    async with _worker_lock:
+        _workers_stopping = True
+        if not _worker_threads:
+            return
+        client = get_client()
+        for thread_id, (_, lease) in tuple(_worker_threads.items()):
+            try:
+                page_size = 100
+                offset = 0
+                while True:
+                    runs = await client.runs.list(
+                        thread_id, limit=page_size, offset=offset
+                    )
+                    for run in runs:
+                        if run["status"] in {"pending", "running"}:
+                            await client.runs.cancel(
+                                thread_id, run["run_id"], wait=True
+                            )
+                    if len(runs) < page_size:
+                        break
+                    offset += len(runs)
+                await _finish_mutation(asyncio.to_thread(lease.release))
+                _worker_threads.pop(thread_id, None)
+            except Exception:
+                logger.exception("Could not shut down local worker %s", thread_id)
+
+
+async def make_worker_graph(
+    config: dict[str, Any] | None = None,
+    runtime: LangGraphServerRuntime[CLIContextSchema] | None = None,
+) -> Any:  # noqa: ANN401
+    """Return the worker graph after binding the child thread to its parent's workspace.
+
+    Raises:
+        ValueError: If execution context or a distinct parent thread is missing.
+    """
+    execution = runtime.execution_runtime if runtime is not None else None
+    if execution is None:
+        return (await get_server_runtime()).worker
+    context = CLIContextSchema.from_payload(execution.context)
+    thread_id = (config or {}).get("configurable", {}).get("thread_id")
+    if context is None or not isinstance(thread_id, str) or not thread_id:
+        msg = "A thread id and workspace context are required for execution."
+        raise ValueError(msg)
+    parent_id = (config or {}).get("metadata", {}).get("parent_thread_id")
+    if not isinstance(parent_id, str) or not parent_id or parent_id == thread_id:
+        msg = "A distinct parent thread is required for a local worker."
+        raise ValueError(msg)
+    from deepagents_code.workspace import (
+        bind_thread_workspace,
+        require_thread_workspace,
+    )
+
+    parent = await require_thread_workspace(parent_id, context.workspace)
+    binding = await bind_thread_workspace(
+        thread_id,
+        parent.cwd,
+        parent.workspace_config(),
+        config_fingerprint=parent.config_fingerprint,
+    )
+    await require_thread_workspace(thread_id, context.workspace)
+    return (await _workspace_runtime(binding)).worker

@@ -15,7 +15,8 @@ import html
 import json
 import logging
 import urllib.parse
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from copy import deepcopy
 from datetime import UTC, datetime
 from typing import Annotated, Any, Literal, NotRequired, TypedDict, cast
@@ -101,6 +102,8 @@ class AsyncSubAgent(TypedDict):
         context, not the child's prior context. Queued updates capture that context
         when sent, not when they start. A remote subagent (`url`) receives no context.
     """
+
+    prepare_run: NotRequired[Callable[[str, ToolRuntime], AbstractAsyncContextManager[dict[str, Any]]]]
 
     name: str
     """Unique identifier for the async subagent."""
@@ -409,6 +412,26 @@ def _thread_metadata(spec: AsyncSubAgent, runtime: ToolRuntime) -> dict[str, str
     if "assistant_id" in reference:
         metadata["parent_assistant_id"] = reference["assistant_id"]
     return metadata
+
+
+@asynccontextmanager
+async def _prepared_run_options(
+    spec: AsyncSubAgent, thread_id: str, runtime: ToolRuntime
+) -> AsyncIterator[dict[str, Any]]:
+    options = _run_options(spec, runtime)
+    prepare = spec.get("prepare_run")
+    if prepare is None:
+        yield options
+        return
+    async with prepare(thread_id, runtime) as prepared:
+        extra = dict(prepared)
+        merged = {**options, **extra}
+        for key in ("headers", "config"):
+            if key in options and key in extra:
+                merged[key] = {**options[key], **extra[key]}
+        if "config" in merged and "configurable" in options.get("config", {}) and "configurable" in extra.get("config", {}):
+            merged["config"]["configurable"] = {**options["config"]["configurable"], **extra["config"]["configurable"]}
+        yield merged
 
 
 def _run_options(spec: AsyncSubAgent, runtime: ToolRuntime) -> dict[str, Any]:
@@ -853,12 +876,13 @@ def _build_start_tool(
         try:
             client = clients.get_async(subagent_type)
             thread = await client.threads.create(metadata=_thread_metadata(spec, runtime))
-            run = await client.runs.create(
-                thread_id=thread["thread_id"],
-                assistant_id=spec["graph_id"],
-                input={"messages": messages},
-                **_run_options(spec, runtime),
-            )
+            async with _prepared_run_options(spec, thread["thread_id"], runtime) as options:
+                run = await client.runs.create(
+                    thread_id=thread["thread_id"],
+                    assistant_id=spec["graph_id"],
+                    input={"messages": messages},
+                    **options,
+                )
         except Exception as e:  # noqa: BLE001  # LangGraph SDK raises untyped errors
             logger.warning("Failed to launch async subagent '%s': %s", subagent_type, e)
             return f"Failed to launch async subagent '{subagent_type}': {e}"
@@ -1207,13 +1231,14 @@ def _build_update_tool(
             return error
         try:
             client = clients.get_async(tracked["agent_name"])
-            run = await client.runs.create(
-                thread_id=tracked["thread_id"],
-                assistant_id=spec["graph_id"],
-                input={"messages": [{"role": "user", "content": message}]},
-                multitask_strategy=strategy,
-                **_run_options(spec, runtime),
-            )
+            async with _prepared_run_options(spec, tracked["thread_id"], runtime) as options:
+                run = await client.runs.create(
+                    thread_id=tracked["thread_id"],
+                    assistant_id=spec["graph_id"],
+                    input={"messages": [{"role": "user", "content": message}]},
+                    multitask_strategy=strategy,
+                    **options,
+                )
         except Exception as e:  # noqa: BLE001  # LangGraph SDK raises untyped errors
             logger.warning("Failed to update async subagent '%s': %s", tracked["agent_name"], e)
             return f"Failed to update async subagent: {e}"
