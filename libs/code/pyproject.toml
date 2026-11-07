@@ -156,7 +156,7 @@ quickjs = []
 
 [project.scripts]
 deepagents-code = "deepagents_code:cli_main"
-af-agnt = "deepagents_code:cli_main"
+af-dcode = "deepagents_code:cli_main"
 
 [project.urls]
 Homepage = "https://www.langchain.com/dcode"
