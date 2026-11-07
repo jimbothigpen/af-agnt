@@ -2008,13 +2008,13 @@ def _lead_state(status: str = "running", **extra: Any) -> dict[str, Any]:
     return {**_lead_record(status)["values"], **extra}
 
 
-async def _pull(hook: str, state: dict[str, Any], server: _FakeServer) -> Any:  # noqa: ANN401
+async def _pull(hook: str, state: dict[str, Any], server: _FakeServer, runtime: Any = None) -> Any:  # noqa: ANN401
     """Call one of the middleware's pull hooks with the lead's state."""
     middleware = AsyncSubAgentMiddleware(async_subagents=[_make_spec("remote", url=None)])
     with (
         patch("deepagents.middleware.async_subagents.get_client", return_value=server),
     ):
-        return await getattr(middleware, hook)(state, MagicMock())
+        return await getattr(middleware, hook)(state, runtime or MagicMock())
 
 
 def _ended(content: str = "remote done") -> _FakeServer:
@@ -2059,6 +2059,20 @@ class TestParentPull:
         assert [e["status"] for e in _pulled_events(update)] == ["success"]
         assert "<result>\nremote done\n</result>" in _text(update["messages"][0])
         assert update["async_tasks"]["thread_abc"]["status"] == "success"
+
+    async def test_terminal_pull_emits_panel_event(self) -> None:
+        events: list[dict[str, Any]] = []
+        runtime = SimpleNamespace(stream_writer=events.append)
+        update = await _pull("abefore_model", _lead_state(), _ended(), runtime=runtime)
+        assert update["async_tasks"]["thread_abc"]["status"] == "success"
+        assert events == [
+            {
+                "type": "subagent",
+                "phase": "complete",
+                "id": "thread_abc",
+                "eval_id": "__async__",
+            }
+        ]
 
     async def test_unreadable_thread_is_checked_again_not_reported_as_success(self) -> None:
         """A paused subagent's run ends as `success`; only its thread shows the pause, so a failed read can't decide."""

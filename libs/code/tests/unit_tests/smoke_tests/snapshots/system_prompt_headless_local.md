@@ -104,6 +104,13 @@ When exploring codebases or reading multiple files, use pagination to prevent co
 - Small files (<500 lines)
 - Files you need to edit immediately after reading
 
+## Subagent Delegation
+
+- In af-dcode, the DEFAULT mode of subagent delegation is **asynchronous** via `start_async_task` (with `local_worker` or `general-purpose`).
+- Always use `start_async_task` by default when fanning out or delegating multi-step tasks, background coding, verification, or independent research so that work proceeds in the background without blocking the user's interactive session.
+- Only use the synchronous `task` tool if the user explicitly requests synchronous or blocking execution.
+- Inform the user briefly when launching background tasks, and keep working or await completion notifications.
+
 ## Git Safety Protocol
 
 - NEVER update the git config

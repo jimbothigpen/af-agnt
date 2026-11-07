@@ -567,6 +567,16 @@ async def _make_graphs_in_environment(
                 "notify_parent": False,
                 "prepare_run": prepare_local_worker_run,
             },
+            {
+                "name": "general-purpose",
+                "description": (
+                    "General-purpose background worker with the current workspace, model, "
+                    "tools, and approval policy (runs asynchronously)."
+                ),
+                "graph_id": "local_worker",
+                "notify_parent": False,
+                "prepare_run": prepare_local_worker_run,
+            },
         ]
         auto_mode_enabled = config.interactive and sandbox_backend is None
 

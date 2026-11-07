@@ -196,10 +196,10 @@ ASYNC_PANEL_EVAL_ID = "__async__"
 """`eval_id` that groups background async-subagent events into one persistent panel phase."""
 
 
-def _emit_panel_event(runtime: ToolRuntime, phase: str, task_id: str, **fields: Any) -> None:
+def _emit_panel_event(runtime: Any, phase: str, task_id: str, **fields: Any) -> None:
     """Emit a `subagent` lifecycle event on the custom stream; never raises."""
     writer = getattr(runtime, "stream_writer", None)
-    if writer is None:
+    if writer is None or not callable(writer):
         return
     try:
         writer({"type": "subagent", "phase": phase, "id": task_id, "eval_id": ASYNC_PANEL_EVAL_ID, **fields})
@@ -207,7 +207,7 @@ def _emit_panel_event(runtime: ToolRuntime, phase: str, task_id: str, **fields: 
         logger.debug("Failed to emit subagent panel event for task %s", task_id, exc_info=True)
 
 
-def _emit_terminal_event(runtime: ToolRuntime, task_id: str, previous: str, status: str) -> None:
+def _emit_terminal_event(runtime: Any, task_id: str, previous: str, status: str) -> None:
     """Emit a panel `complete`/`error` event when a task first reaches a terminal status."""
     if status not in _TERMINAL_STATUSES or previous in _TERMINAL_STATUSES:
         return
@@ -1697,7 +1697,7 @@ class AsyncSubAgentMiddleware(AgentMiddleware[Any, ContextT, ResponseT]):
         """(async) Record the notification that started this run, then add status updates from this agent's tasks."""
         recorded = self._record_notification(state) or {}
         tasks = {**(state.get("async_tasks") or {}), **recorded.get("async_tasks", {})}
-        updates = await self._apull(tasks)
+        updates = await self._apull(tasks, runtime=runtime)
         if recorded.get("messages"):
             updates["messages"] = [*recorded["messages"], *updates.get("messages", [])]
         return {
@@ -1712,7 +1712,7 @@ class AsyncSubAgentMiddleware(AgentMiddleware[Any, ContextT, ResponseT]):
 
     async def abefore_model(self, state: AsyncSubAgentState, runtime: Runtime[ContextT]) -> dict[str, Any] | None:  # noqa: ARG002  # signature set by AgentMiddleware
         """(async) Add status updates from this agent's tasks before the model call."""
-        return await self._apull(state.get("async_tasks") or {}) or None
+        return await self._apull(state.get("async_tasks") or {}, runtime=runtime) or None
 
     def after_model(self, state: AsyncSubAgentState, runtime: Runtime[ContextT]) -> dict[str, Any] | None:  # noqa: ARG002  # signature set by AgentMiddleware
         """Pass through: checking tasks needs the async path, which the Agent Server uses."""
@@ -1727,12 +1727,12 @@ class AsyncSubAgentMiddleware(AgentMiddleware[Any, ContextT, ResponseT]):
         messages = state.get("messages") or []
         if not messages or getattr(messages[-1], "tool_calls", None):
             return None
-        updates = await self._apull(state.get("async_tasks") or {})
+        updates = await self._apull(state.get("async_tasks") or {}, runtime=runtime)
         if not updates.get("messages"):
             return updates or None
         return {**updates, "jump_to": "model"}
 
-    async def _apull(self, tasks: Mapping[str, AsyncTask]) -> dict[str, Any]:
+    async def _apull(self, tasks: Mapping[str, AsyncTask], runtime: Any = None) -> dict[str, Any]:
         """Check unfinished tasks; return their updated records and a notification per new outcome.
 
         Outcomes the agent already saw (through a check, a list, or an earlier
@@ -1751,8 +1751,11 @@ class AsyncSubAgentMiddleware(AgentMiddleware[Any, ContextT, ResponseT]):
             if status == task["status"] and run["run_id"] == task["run_id"]:
                 continue
             records[task["task_id"]] = _observed(task, status, run["run_id"])
-            if status != task["status"] and (event := _check_event(task, run, thread, status)):
-                messages.append(_notification_message(event))
+            if status != task["status"]:
+                if runtime is not None:
+                    _emit_terminal_event(runtime, task["task_id"], task["status"], status)
+                if (event := _check_event(task, run, thread, status)):
+                    messages.append(_notification_message(event))
         update: dict[str, Any] = {"async_tasks": records} if records else {}
         if messages:
             update["messages"] = messages
